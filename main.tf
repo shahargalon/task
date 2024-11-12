@@ -119,6 +119,8 @@ module "ec2_instance" {
                       location ~ ^/(.+)$ {
                       proxy_pass http://${module.s3_bucket.s3_bucket_bucket_regional_domain_name}/\$1;
                       resolver 10.0.0.2;
+                      add_header Content-Type text/html always;
+                      proxy_hide_header Content-Disposition;
                       
                       }
                       # Load configuration files for the default server block.
