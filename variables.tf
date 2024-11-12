@@ -26,6 +26,11 @@ variable "subnet_id" {
   type        = string
 }
 
+variable "s3_endpointID" {
+  description = "the ID of the s3 endpoint"
+  type        = string
+}
+
 # Optional: If you're using an SSH key pair to access the EC2 instance, you can add this variable
 variable "key_name" {
   description = "The name of the SSH key pair to use for EC2 instance."

@@ -7,6 +7,21 @@ module "s3_bucket" {
 
   control_object_ownership = true
   object_ownership         = "ObjectWriter"
+  attach_policy            = true
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = ["s3:GetObject"]
+      Principal = "*"
+      Effect    = "Allow"
+      Resource  = "arn:aws:s3:::${var.bucket_name}/*"
+      Condition = {
+        "StringEquals" = {
+          "aws:SourceVpce" = var.s3_endpointID
+        }
+      }
+    }]
+  })
 
   versioning = {
     enabled = true
@@ -16,24 +31,10 @@ module "s3_bucket" {
 resource "aws_s3_object" "index_html" {
   bucket = module.s3_bucket.s3_bucket_id
   key    = "index.html"
-  source = "index.html"
+  content = file("index.html")
   acl    = "private"
 }
 
-
-resource "aws_iam_policy" "ec2_s3_policy" {
-  name        = "ec2_s3_access_policy"
-  description = "Allow EC2 instances to access the private S3 bucket"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action   = ["s3:GetObject"]
-      Effect   = "Allow"
-      Resource = "${module.s3_bucket.s3_bucket_arn}/*"
-    }]
-  })
-}
 
 #Create a security group allowing HTTP access
 resource "aws_security_group" "ec2_sg" {
@@ -69,7 +70,6 @@ module "ec2_instance" {
   create_iam_instance_profile = true
 
   iam_role_policies = {
-    s3  = aws_iam_policy.ec2_s3_policy.arn
     ssm = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
   }
   user_data = <<-EOF
@@ -83,13 +83,58 @@ module "ec2_instance" {
               # Start and enable the Nginx service
               systemctl start nginx
               systemctl enable nginx
+              cat > /etc/nginx/nginx.conf <<EOFILE
+              user nginx;
+              worker_processes auto;
+              error_log /var/log/nginx/error.log;
+              pid /run/nginx.pid;
 
-              # Create a directory for the S3 file
-              mkdir -p /var/www/html
+              include /usr/share/nginx/modules/*.conf;
 
-              # Download the index.html file from S3
-              aws s3 cp s3://${module.s3_bucket.s3_bucket_id}/index.html /usr/share/nginx/html/index.html
+              events {
+                  worker_connections 1024;
+              }
 
+              http {
+                  log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                                    '$status $body_bytes_sent "$http_referer" '
+                                    '"$http_user_agent" "$http_x_forwarded_for"';
+
+                  access_log  /var/log/nginx/access.log  main;
+
+                  sendfile            on;
+                  tcp_nopush          on;
+                  tcp_nodelay         on;
+                  keepalive_timeout   65;
+                  types_hash_max_size 4096;
+
+                  include             /etc/nginx/mime.types;
+                  default_type        application/octet-stream;
+                  include /etc/nginx/conf.d/*.conf;
+
+                  server {
+                      listen       80;
+                      listen       [::]:80;
+                      server_name  _;
+                      location ~ ^/(.+)$ {
+                      proxy_pass http://${module.s3_bucket.s3_bucket_bucket_regional_domain_name}/\$1;
+                      resolver 10.0.0.2;
+                      
+                      }
+                      # Load configuration files for the default server block.
+                      include /etc/nginx/default.d/*.conf;
+
+                      error_page 404 /404.html;
+                      location = /404.html {
+                      }
+
+                      error_page 500 502 503 504 /50x.html;
+                      location = /50x.html {
+                      }
+                  }
+                  }
+              EOFILE
+          
               # Restart Nginx to apply the changes
               systemctl restart nginx
               EOF
@@ -117,35 +162,35 @@ module "alb" {
       cidr_ipv4   = "0.0.0.0/0"
     }
   }
-    security_group_egress_rules = {
-      all = {
-        ip_protocol = "-1"
-        cidr_ipv4   = "10.0.0.0/16"
-      }
-    }
-
-
-    listeners = {
-      http = {
-        port     = 80
-        protocol = "HTTP"
-        forward = {
-          target_group_key = "ex-instance"
-        }
-      }
-    }
-
-    target_groups = {
-      ex-instance = {
-        name_prefix = "nginx"
-        protocol    = "HTTP"
-        port        = 80
-        target_type = "instance"
-        target_id   = module.ec2_instance.id
-      }
-    }
-
-    tags = {
-      terraform = "true"
+  security_group_egress_rules = {
+    all = {
+      ip_protocol = "-1"
+      cidr_ipv4   = "10.0.0.0/16"
     }
   }
+
+
+  listeners = {
+    http = {
+      port     = 80
+      protocol = "HTTP"
+      forward = {
+        target_group_key = "ex-instance"
+      }
+    }
+  }
+
+  target_groups = {
+    ex-instance = {
+      name_prefix = "nginx"
+      protocol    = "HTTP"
+      port        = 80
+      target_type = "instance"
+      target_id   = module.ec2_instance.id
+    }
+  }
+
+  tags = {
+    terraform = "true"
+  }
+}
